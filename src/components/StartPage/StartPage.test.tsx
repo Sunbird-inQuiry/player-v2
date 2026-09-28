@@ -69,4 +69,60 @@ describe('StartPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /Concepts & Recall/i }));
     expect(onSectionSelect).toHaveBeenCalledWith(1);
   });
+
+  describe('root-level questions (implicit section)', () => {
+    const implicitSections: Section[] = [
+      mkSection('a', 'qwert-section', 1, ''),
+      {
+        identifier: 'root-implicit',
+        name: 'Qwert-test', // the questionset's own root name — must never render as a card label
+        isImplicitSection: true,
+        children: [
+          { identifier: 'test', name: 'test', body: '', primaryCategory: 'multiple choice question', maxScore: 1 },
+          { identifier: 'maths', name: 'maths', body: '', primaryCategory: 'multiple choice question', maxScore: 1 },
+        ],
+        timeLimits: { max: 0, min: 0 },
+        allowSkip: true,
+        shuffle: false,
+      },
+    ];
+
+    it('gives each root-level question its own card instead of one lumped, mislabeled card', () => {
+      const { container } = render(
+        <StartPage
+          {...baseProps}
+          sections={implicitSections}
+          totalQuestions={3}
+          totalSections={3}
+        />,
+      );
+      // No card is ever labeled with the questionset's own root name.
+      expect(screen.queryByText('Qwert-test')).not.toBeInTheDocument();
+      // Each root-level question gets its own card, by its own title.
+      expect(screen.getByText('test')).toBeInTheDocument();
+      expect(screen.getByText('maths')).toBeInTheDocument();
+      // Numbered continuously with the real section: 1, 2, 3. Read off the
+      // cards themselves — the stat tiles are numbers too, so a document-wide
+      // getByText would be ambiguous.
+      const badges = Array.from(container.querySelectorAll('[class*="sectionCard"]')).map(
+        (c) => c.querySelector('[class*="badge"]')?.textContent,
+      );
+      expect(badges).toEqual(['1', '2', '3']);
+    });
+
+    it('jumps straight to a root-level question via onQuestionSelect', () => {
+      const onQuestionSelect = vi.fn();
+      render(
+        <StartPage
+          {...baseProps}
+          sections={implicitSections}
+          totalQuestions={3}
+          totalSections={3}
+          onQuestionSelect={onQuestionSelect}
+        />,
+      );
+      fireEvent.click(screen.getByRole('button', { name: /maths/i }));
+      expect(onQuestionSelect).toHaveBeenCalledWith(1, 1);
+    });
+  });
 });

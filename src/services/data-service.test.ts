@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the HTTP layer so the data service is tested in isolation (no axios/network).
 vi.mock('./http-client', () => ({
@@ -70,11 +70,20 @@ beforeEach(() => {
   mockPost.mockReset();
 });
 
+// These tests set window.questionSetHierarchyUrl / window.questionListUrl to
+// exercise the host-override path. Clear them here rather than inline at the
+// end of each test: an inline delete is skipped when an assertion throws, and
+// the override would then leak into every subsequent test in the run.
+afterEach(() => {
+  delete (window as any).questionSetHierarchyUrl;
+  delete (window as any).questionListUrl;
+});
+
 describe('data-service', () => {
   describe('getQuestionSetHierarchy', () => {
     it('unwraps result.questionset', async () => {
       mockGet.mockResolvedValue({ questionset: hierarchy.questionset });
-      const qs = await getQuestionSetHierarchy('do_set', { baseUrl: 'https://host' });
+      const qs = await getQuestionSetHierarchy('do_set', { baseUrl: 'https://host', previewMode: true });
       expect(qs.identifier).toBe('do_set');
       expect(mockGet).toHaveBeenCalledWith(
         `${ApiEndPoints.getQuestionSetHierarchy}do_set?mode=edit`,
@@ -90,7 +99,7 @@ describe('data-service', () => {
     it('honors a host-provided window.questionSetHierarchyUrl override', async () => {
       (window as any).questionSetHierarchyUrl = '/action/questionset/v2/hierarchy/';
       mockGet.mockResolvedValue({ questionset: hierarchy.questionset });
-      await getQuestionSetHierarchy('do_set');
+      await getQuestionSetHierarchy('do_set', { previewMode: true });
       expect(mockGet).toHaveBeenCalledWith('/action/questionset/v2/hierarchy/do_set?mode=edit', {
         baseURL: undefined,
       });
@@ -99,7 +108,7 @@ describe('data-service', () => {
 
     it('prepends the host slug (pathPrefix) instead of the /api fallback', async () => {
       mockGet.mockResolvedValue({ questionset: hierarchy.questionset });
-      await getQuestionSetHierarchy('do_set', { pathPrefix: '/portal' });
+      await getQuestionSetHierarchy('do_set', { pathPrefix: '/portal', previewMode: true });
       expect(mockGet).toHaveBeenCalledWith('/portal/questionset/v2/hierarchy/do_set?mode=edit', {
         baseURL: undefined,
       });
@@ -107,7 +116,7 @@ describe('data-service', () => {
 
     it('falls back to /api when no pathPrefix is given', async () => {
       mockGet.mockResolvedValue({ questionset: hierarchy.questionset });
-      await getQuestionSetHierarchy('do_set');
+      await getQuestionSetHierarchy('do_set', { previewMode: true });
       expect(mockGet).toHaveBeenCalledWith('/api/questionset/v2/hierarchy/do_set?mode=edit', {
         baseURL: undefined,
       });
@@ -117,6 +126,50 @@ describe('data-service', () => {
       mockGet.mockResolvedValue({});
       await expect(getQuestionSetHierarchy('do_set')).rejects.toMatchObject({ kind: 'invalid' });
     });
+
+    // `mode=edit` returns the backend's Draft/.img working copy. Sending it by
+    // default would serve a creator's unpublished content to learners.
+    it('omits mode=edit by default (published content only)', async () => {
+      mockGet.mockResolvedValue({ questionset: hierarchy.questionset });
+      await getQuestionSetHierarchy('do_set');
+      expect(mockGet).toHaveBeenCalledWith('/api/questionset/v2/hierarchy/do_set', {
+        baseURL: undefined,
+      });
+    });
+
+    it('omits mode=edit when previewMode is explicitly false', async () => {
+      mockGet.mockResolvedValue({ questionset: hierarchy.questionset });
+      await getQuestionSetHierarchy('do_set', { previewMode: false });
+      expect(mockGet.mock.calls[0][0]).not.toContain('mode=edit');
+    });
+
+    // A host-supplied URL may already carry a query string (e.g. a gateway
+    // token). The identifier belongs on the PATH — appending it blindly put it
+    // inside the query, as `/hierarchy/?foo=1/do_set`, where it became part of
+    // `foo`'s value instead of identifying the questionset.
+    it('appends the identifier to the path when the host URL carries a query string', async () => {
+      (window as any).questionSetHierarchyUrl = '/action/questionset/v2/hierarchy/?foo=1';
+      mockGet.mockResolvedValue({ questionset: hierarchy.questionset });
+      await getQuestionSetHierarchy('do_set');
+      expect(mockGet.mock.calls[0][0]).toBe('/action/questionset/v2/hierarchy/do_set?foo=1');
+    });
+
+    it('joins mode=edit with & onto a host URL that already has a query', async () => {
+      (window as any).questionSetHierarchyUrl = '/action/questionset/v2/hierarchy/?foo=1';
+      mockGet.mockResolvedValue({ questionset: hierarchy.questionset });
+      await getQuestionSetHierarchy('do_set', { previewMode: true });
+      expect(mockGet.mock.calls[0][0]).toBe(
+        '/action/questionset/v2/hierarchy/do_set?foo=1&mode=edit',
+      );
+    });
+
+    it('handles a host URL with no trailing slash and no query', async () => {
+      (window as any).questionSetHierarchyUrl = '/action/questionset/v2/hierarchy';
+      mockGet.mockResolvedValue({ questionset: hierarchy.questionset });
+      await getQuestionSetHierarchy('do_set');
+      expect(mockGet.mock.calls[0][0]).toBe('/action/questionset/v2/hierarchy/do_set');
+    });
+
   });
 
   describe('getQuestions', () => {
@@ -135,6 +188,14 @@ describe('data-service', () => {
         { request: { search: { identifier: ['q1', 'q2'] } } },
         { baseURL: 'https://host' },
       );
+    });
+
+    // `?lang=` on a URL that already has a query would emit a second `?`.
+    it('joins lang with & when the host list URL already has a query', async () => {
+      (window as any).questionListUrl = '/action/question/v2/list?foo=1';
+      mockPost.mockResolvedValue({ questions });
+      await getQuestions(['q1'], { language: 'fr' });
+      expect(mockPost.mock.calls[0][0]).toBe('/action/question/v2/list?foo=1&lang=fr');
     });
 
     it('honors a host-provided window.questionListUrl override', async () => {
@@ -211,6 +272,59 @@ describe('data-service', () => {
       mockGet.mockRejectedValue(new QumlApiError('http', 'boom', 500));
       await expect(loadQuestionSet('do_set')).rejects.toMatchObject({ kind: 'http', status: 500 });
       expect(mockPost).not.toHaveBeenCalled();
+    });
+
+    it('wraps a fully flat root (no sections) into one implicit section', async () => {
+      mockGet.mockResolvedValue({
+        questionset: {
+          identifier: 'do_flat',
+          name: 'Flat set',
+          objectType: 'QuestionSet',
+          children: [
+            { identifier: 'q1', objectType: 'Question', index: 1, maxScore: 1 },
+            { identifier: 'q2', objectType: 'Question', index: 2, maxScore: 1 },
+          ],
+        },
+      });
+      mockPost.mockResolvedValue({ questions });
+
+      const { sections } = await loadQuestionSet('do_flat');
+      expect(sections).toHaveLength(1);
+      expect(sections[0].isImplicitSection).toBe(true);
+      expect(sections[0].children.map((q) => q.identifier)).toEqual(['q1', 'q2']);
+    });
+
+    it('supports a mixed layout — loose root questions interleaved with a real section', async () => {
+      mockGet.mockResolvedValue({
+        questionset: {
+          identifier: 'do_mixed',
+          name: 'Mixed set',
+          objectType: 'QuestionSet',
+          children: [
+            { identifier: 'q1', objectType: 'Question', index: 1, maxScore: 3 },
+            {
+              identifier: 'do_section',
+              objectType: 'QuestionSet',
+              name: 'Section',
+              children: [{ identifier: 'q2', objectType: 'Question', index: 1, maxScore: 1 }],
+            },
+          ],
+        },
+      });
+      mockPost.mockResolvedValue({ questions });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { sections } = await loadQuestionSet('do_mixed');
+      // nothing dropped, no warning about an unsupported layout
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+
+      expect(sections).toHaveLength(2);
+      // loose root question before the real section, hierarchy order preserved
+      expect(sections[0].isImplicitSection).toBe(true);
+      expect(sections[0].children.map((q) => q.identifier)).toEqual(['q1']);
+      expect(sections[1].isImplicitSection).toBeFalsy();
+      expect(sections[1].children.map((q) => q.identifier)).toEqual(['q2']);
     });
   });
 });

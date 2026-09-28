@@ -52,6 +52,8 @@ export interface RawQuestionSetChild {
   objectType?: string;
   index?: number;
   children?: RawQuestionSetChild[];
+  /** Set by `extractSectionNodes` on a section it synthesized to hold root-level questions. */
+  isImplicitSection?: boolean;
   [key: string]: unknown;
 }
 

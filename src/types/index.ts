@@ -124,6 +124,12 @@ export interface Section {
    * undefined defers to the assessment-level config.
    */
   showFeedback?: boolean;
+  /**
+   * True for a section the data layer synthesized to hold root-level questions
+   * with no authored Section wrapper; never set for a real section. A
+   * synthetic grouping isn't a "section", so it gets no intro screen.
+   */
+  isImplicitSection?: boolean;
 }
 
 export interface Assessment {

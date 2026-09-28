@@ -23,8 +23,24 @@ import {
 import { QumlApiError } from '../../types/api';
 import { calculateScore } from '../../registry/scoring-registry';
 import { isAnswered } from '../../utils/answered';
+import {
+  globalQuestionNumber,
+  sectionStepCount,
+  sectionStepOrdinal,
+  stepLabel,
+} from '../../utils/sections';
 import type { Question, Section, PlayerConfig, I18nValue } from '../../types';
 import styles from './MainPlayer.module.scss';
+
+/**
+ * Modes in which the host is previewing authoring output, so the player should
+ * fetch the Draft working copy. An explicit allow-list, not "any truthy mode":
+ * `config` is an open record and hosts commonly pass `mode: 'play'`, which a
+ * truthiness test would put back on unpublished Draft content.
+ */
+const AUTHORING_MODES = ['edit', 'review', 'read', 'orgreview', 'sourcingreview'];
+const isAuthoringMode = (m: unknown) =>
+  typeof m === 'string' && AUTHORING_MODES.includes(m.toLowerCase());
 
 /**
  * MainPlayer — top-level orchestrator + assessment shell (Phase 5 engine +
@@ -102,6 +118,11 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
   // Section intros can be disabled via config (spec §6.0).
   const sectionIntrosEnabled =
     (playerConfig?.config as { showSectionIntro?: boolean } | undefined)?.showSectionIntro !== false;
+
+  // A synthesized group holding root-level questions isn't a "section" from
+  // the author's perspective — never show its intro, whatever the config says.
+  const shouldShowSectionIntro = (index: number) =>
+    sectionIntrosEnabled && !state.sections[index]?.isImplicitSection;
 
   // Preview parity (Angular): the host can ask the player to skip the overview /
   // start page and the submit-confirmation step. These arrive on the questionset
@@ -206,6 +227,12 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
     const pathPrefix =
       (typeof cfg.apiSlug === 'string' ? cfg.apiSlug : undefined) ??
       (typeof cfg.slug === 'string' ? cfg.slug : undefined);
+    // Both `config.mode` (what an editor host forwards into the player config)
+    // and `context.mode` (where this repo otherwise reads mode from) count: an
+    // editor setting only the latter would silently lose draft preview, and an
+    // unpublished questionset has no Live node, so the fetch would fail.
+    const previewMode =
+      isAuthoringMode(cfg.mode) || isAuthoringMode(playerConfig.context?.mode);
 
     setLoading(true);
     try {
@@ -213,6 +240,7 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
         baseUrl,
         language: playerConfig.config?.language,
         pathPrefix,
+        previewMode,
       });
       setMetadata(qsMetadata as Record<string, unknown>);
       setSections(sections);
@@ -267,6 +295,9 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
       (n, s) => n + s.children.reduce((m, q) => m + (q.maxScore ?? 1), 0),
       0,
     );
+    // Not `sections.length`: a root-level question is its own step alongside
+    // real sections (see utils/sections).
+    const totalSections = sectionStepCount(state.sections);
     const timeLimits = (data.timeLimits as { questionSet?: { max?: number } } | undefined)
       ?.questionSet;
     return {
@@ -274,7 +305,7 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
       description: readI18n(data.description as I18nValue | undefined, language) || undefined,
       instructions: data.instructions as string | undefined,
       totalQuestions,
-      totalSections: state.sections.length,
+      totalSections,
       timeLimit: Number(timeLimits?.max) || 0,
       // Angular parity (main-player.component.ts:172 → header *ngIf="showTimer"):
       // the timer is shown ONLY when the content opts in via `showTimer`. Absent /
@@ -418,7 +449,7 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
       telemetryStartRef.current = Date.now();
       logAssessmentStart(Date.now() - playerMountedAtRef.current);
     }
-    setStage(sectionIntrosEnabled ? 'sectionIntro' : 'assessment');
+    setStage(shouldShowSectionIntro(0) ? 'sectionIntro' : 'assessment');
   };
 
   const handleBegin = () => {
@@ -426,18 +457,20 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
     setStage('assessment');
   };
 
-  // Overview section card → jump straight into that section's intro.
-  const handleSectionSelectFromOverview = (index: number) => {
-    setCurrentSection(index);
-    setCurrentQuestion(0);
+  // Overview card → jump straight into that section's intro (or, for a
+  // root-level question's own card, straight to that exact question).
+  const handleQuestionSelectFromOverview = (sectionIndex: number, questionIndex: number) => {
+    setCurrentSection(sectionIndex);
+    setCurrentQuestion(questionIndex);
     beginAssessmentTimer();
     setHasStarted(true);
     if (telemetryStartRef.current == null) {
       telemetryStartRef.current = Date.now();
       logAssessmentStart(Date.now() - playerMountedAtRef.current);
     }
-    setStage(sectionIntrosEnabled ? 'sectionIntro' : 'assessment');
+    setStage(shouldShowSectionIntro(sectionIndex) ? 'sectionIntro' : 'assessment');
   };
+  const handleSectionSelectFromOverview = (index: number) => handleQuestionSelectFromOverview(index, 0);
 
   // Submit (header) → open the confirmation dialog (spec §7.1), unless the host
   // opted out via requiresSubmit:'No' (then submit straight to results).
@@ -458,7 +491,7 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
     onPlayerEvent?.({ type: 'quizEnd', summary });
     const durationMs = telemetryStartRef.current != null ? Date.now() - telemetryStartRef.current : 0;
     const starttime = telemetryStartRef.current ?? Date.now();
-    logAssessmentEnd(globalQuestionNumber, overview.totalQuestions, durationMs, summary.totalScore);
+    logAssessmentEnd(currentGlobalQuestionNumber, overview.totalQuestions, durationMs, summary.totalScore);
     logSummary(
       {
         correct: summary.correct,
@@ -467,7 +500,7 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
         skipped: summary.skipped,
         score: summary.totalScore,
       },
-      { currentQuestionIndex: globalQuestionNumber, totalQuestions: overview.totalQuestions, starttime },
+      { currentQuestionIndex: currentGlobalQuestionNumber, totalQuestions: overview.totalQuestions, starttime },
     );
     // Angular parity (viewer-service.ts raiseSummaryEvent → qumlPlayerEvent.emit
     // with eid:'QUML_SUMMARY') — the portal's course-completion tracking
@@ -547,7 +580,7 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
     if (nextIndex < state.sections.length) {
       setCurrentSection(nextIndex);
       setCurrentQuestion(0);
-      setStage(sectionIntrosEnabled ? 'sectionIntro' : 'assessment');
+      setStage(shouldShowSectionIntro(nextIndex) ? 'sectionIntro' : 'assessment');
       onPlayerEvent?.({ type: 'sectionEnd', sectionIndex: state.currentSectionIndex });
     } else if (requiresSubmitConfirmation) {
       // End of the last section → confirm before submitting.
@@ -557,13 +590,21 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
     }
   };
 
-  const handleSectionJump = (index: number) => {
-    // Angular parity (section-player.component.ts:898, eventName.goToQuestion).
-    logInteraction('go_to_question', index);
-    setCurrentSection(index);
-    setCurrentQuestion(0);
+  // Angular parity (section-player.component.ts:898, eventName.goToQuestion).
+  const handleQuestionJump = (sectionIndex: number, questionIndex: number) => {
+    // The question, not its section: per-question jumps would otherwise all
+    // report the same pageid. From the arguments, since the setters below have
+    // not taken effect yet.
+    logInteraction(
+      'go_to_question',
+      globalQuestionNumber(state.sections, sectionIndex, questionIndex),
+    );
+    setCurrentSection(sectionIndex);
+    setCurrentQuestion(questionIndex);
     setStage('assessment');
   };
+
+  const handleSectionJump = (index: number) => handleQuestionJump(index, 0);
 
   // showStartPage:'No' → auto-advance past the overview once sections are ready.
   // Angular parity (section-player.component.ts:195,248): with showStartPage:'No'
@@ -620,10 +661,11 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
   const currentSection = state.sections[state.currentSectionIndex];
 
   // Global question counter (across all sections) for the shell header.
-  const priorQuestions = state.sections
-    .slice(0, state.currentSectionIndex)
-    .reduce((n, s) => n + s.children.length, 0);
-  const globalQuestionNumber = priorQuestions + state.currentQuestionIndex + 1;
+  const currentGlobalQuestionNumber = globalQuestionNumber(
+    state.sections,
+    state.currentSectionIndex,
+    state.currentQuestionIndex,
+  );
 
   let content: ReactNode;
   if (stage === 'overview' && skipStartPage && !autoStartedRef.current) {
@@ -644,6 +686,7 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
         hasStarted={hasStarted}
         onStart={handleStart}
         onSectionSelect={handleSectionSelectFromOverview}
+        onQuestionSelect={handleQuestionSelectFromOverview}
         language={language}
       />
     );
@@ -689,8 +732,8 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
         <SectionIntro
           key={`intro-${state.currentSectionIndex}`}
           section={currentSection}
-          sectionIndex={state.currentSectionIndex}
-          totalSections={state.sections.length}
+          sectionIndex={sectionStepOrdinal(state.sections, state.currentSectionIndex)}
+          totalSections={sectionStepCount(state.sections)}
           onBegin={handleBegin}
           onPrevious={() => setStage('overview')}
           language={language}
@@ -714,7 +757,7 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
       stage === 'sectionIntro' && currentSection
         ? `${
             readI18n(currentSection.name, language) ||
-            `${t(language, 'SECTION')} ${String.fromCharCode(65 + state.currentSectionIndex)}`
+            `${t(language, 'SECTION')} ${stepLabel(sectionStepOrdinal(state.sections, state.currentSectionIndex))}`
           } · ${currentSection.children.length} ${t(
             language,
             currentSection.children.length === 1 ? 'QUESTION' : 'QUESTIONS',
@@ -730,14 +773,16 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
           brand={overview.title}
           sections={state.sections}
           currentSectionIndex={state.currentSectionIndex}
+          currentQuestionIndex={state.currentQuestionIndex}
           completed={completed}
+          answers={state.answers}
           timeRemaining={overview.showTimer ? timeRemaining : null}
           timeElapsed={overview.showTimer && overview.timeLimit === 0 ? timeElapsed : null}
-          questionNumber={globalQuestionNumber}
+          questionNumber={currentGlobalQuestionNumber}
           totalQuestions={overview.totalQuestions}
           onSubmit={handleSubmitAssessment}
           onReview={handleReviewBeforeSubmit}
-          reviewAvailable={globalQuestionNumber === overview.totalQuestions}
+          reviewAvailable={currentGlobalQuestionNumber === overview.totalQuestions}
           onMenuClick={() => setDrawerOpen(true)}
           onBrandClick={() => setStage('overview')}
           sectionLabel={sectionLabel}
@@ -749,8 +794,10 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
             <Sidebar
               sections={state.sections}
               currentSectionIndex={state.currentSectionIndex}
+              currentQuestionIndex={state.currentQuestionIndex}
               answers={state.answers}
               onSectionJump={handleSectionJump}
+              onQuestionJump={handleQuestionJump}
               language={language}
             />
           </aside>
@@ -762,8 +809,10 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
             onClose={() => setDrawerOpen(false)}
             sections={state.sections}
             currentSectionIndex={state.currentSectionIndex}
+            currentQuestionIndex={state.currentQuestionIndex}
             answers={state.answers}
             onSectionJump={handleSectionJump}
+            onQuestionJump={handleQuestionJump}
             language={language}
           />
         </div>

@@ -9,6 +9,7 @@ import {
   ShieldIcon,
   PreviousIcon,
 } from '../icons';
+import { sequenceEntries, stepLabel } from '../../utils/sections';
 import type { Section } from '../../types';
 import { useIsCompactViewport } from './useIsCompactViewport';
 import styles from './StartPage.module.scss';
@@ -28,9 +29,6 @@ import styles from './StartPage.module.scss';
  * local UI state in this component; it never reaches Context or the parent.
  */
 
-/** Section cards only show a letter badge for the first few sections. */
-const MAX_BADGED_SECTIONS = 4;
-
 export interface StartPageProps {
   title: string;
   sections: Section[];
@@ -47,6 +45,8 @@ export interface StartPageProps {
   onStart: () => void;
   /** Optional jump-to-section from a section card (defaults to Start). */
   onSectionSelect?: (index: number) => void;
+  /** Optional jump from a root-level question's own card, which it gets instead of a section card. */
+  onQuestionSelect?: (sectionIndex: number, questionIndex: number) => void;
   language?: string;
 }
 
@@ -67,6 +67,7 @@ export function StartPage({
   hasStarted = false,
   onStart,
   onSectionSelect,
+  onQuestionSelect,
   language = 'en',
 }: StartPageProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -153,34 +154,43 @@ export function StartPage({
             <p className={styles.sectionsNote}>{t(language, 'SECTIONS_COVER_NOTE')}</p>
 
             <div className={styles.grid}>
-              {sections.map((section, i) => {
-                const blurb = readI18n(section.description, language);
-                const name = readI18n(section.name, language);
-                // Section cards jump straight into the assessment (bypassing
-                // Start/Resume), so they must be disabled too once attempts
-                // are exhausted — otherwise they're a second way in.
-                const sectionSelectable = onSectionSelect && !attemptsExhausted;
-                const Tag = sectionSelectable ? 'button' : 'div';
+              {sequenceEntries(sections).map((entry, ordinal) => {
+                // Cards jump straight into the assessment (bypassing
+                // Start/Resume), so they must be disabled once attempts are
+                // exhausted — otherwise they're a second way in.
+                const onSelect =
+                  entry.kind === 'question'
+                    ? onQuestionSelect &&
+                      (() => onQuestionSelect(entry.sectionIndex, entry.questionIndex))
+                    : onSectionSelect && (() => onSectionSelect(entry.sectionIndex));
+                const selectable = Boolean(onSelect) && !attemptsExhausted;
+                const Tag = selectable ? 'button' : 'div';
+                const name =
+                  entry.kind === 'question'
+                    ? entry.question.name || `${t(language, 'QUESTION')} ${entry.questionIndex + 1}`
+                    : readI18n(entry.section.name, language);
+                const blurb =
+                  entry.kind === 'question' ? '' : readI18n(entry.section.description, language);
                 return (
                   <Tag
-                    key={section.identifier}
+                    key={
+                      entry.kind === 'question'
+                        ? entry.question.identifier
+                        : entry.section.identifier
+                    }
                     className={styles.sectionCard}
-                    {...(sectionSelectable
-                      ? { type: 'button' as const, onClick: () => onSectionSelect(i) }
-                      : {})}
+                    {...(selectable ? { type: 'button' as const, onClick: onSelect } : {})}
                   >
                     <div className={styles.cardTop}>
-                      {i < MAX_BADGED_SECTIONS && (
-                        <span className={styles.badge} aria-hidden="true">
-                          {String.fromCharCode(65 + i)}
-                        </span>
-                      )}
+                      <span className={styles.badge} aria-hidden="true">
+                        {stepLabel(ordinal)}
+                      </span>
                       <span className={styles.cardName}>{name}</span>
-                      {sectionSelectable && (
-                        <ChevronRightIcon size={18} className={styles.cardChevron} />
-                      )}
+                      {selectable && <ChevronRightIcon size={18} className={styles.cardChevron} />}
                     </div>
-                    <span className={styles.cardCount}>{questionLabel(section.children.length)}</span>
+                    <span className={styles.cardCount}>
+                      {questionLabel(entry.kind === 'question' ? 1 : entry.section.children.length)}
+                    </span>
                     {blurb && <span className={styles.cardBlurb}>{blurb}</span>}
                   </Tag>
                 );

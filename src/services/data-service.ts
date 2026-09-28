@@ -38,6 +38,12 @@ export interface LoadOptions {
    * host does not supply one. A full `window.question*Url` override still wins.
    */
   pathPrefix?: string;
+  /**
+   * Fetch the DRAFT working copy (`?mode=edit`) rather than the published one.
+   * Opt-in, defaulting to false: the same fetch path serves real learners, and
+   * a creator's in-progress draft is a content leak there.
+   */
+  previewMode?: boolean;
 }
 
 /** Normalize the API path prefix (host slug); falls back to `/api`. */
@@ -67,6 +73,24 @@ function hostEndpoint(key: 'questionListUrl' | 'questionSetHierarchyUrl'): strin
   return typeof val === 'string' && val ? val : undefined;
 }
 
+/**
+ * Append a path segment to a base URL that may already carry a query string —
+ * `window.questionSetHierarchyUrl` is host-supplied and can arrive with one.
+ * Naive concatenation put the identifier inside the query: `/hierarchy/?foo=1/do_x`.
+ */
+function appendPathSegment(base: string, segment: string): string {
+  const queryAt = base.indexOf('?');
+  const path = queryAt === -1 ? base : base.slice(0, queryAt);
+  const query = queryAt === -1 ? '' : base.slice(queryAt);
+  const joined = path.endsWith('/') ? `${path}${segment}` : `${path}/${segment}`;
+  return `${joined}${query}`;
+}
+
+/** Add a query param, joining with `&` when the URL already has a query. */
+function withQueryParam(url: string, param: string): string {
+  return `${url}${url.includes('?') ? '&' : '?'}${param}`;
+}
+
 /** Fetch the raw questionset hierarchy (`result.questionset`). */
 export async function getQuestionSetHierarchy(
   identifier: string,
@@ -78,10 +102,12 @@ export async function getQuestionSetHierarchy(
   const base =
     hostEndpoint('questionSetHierarchyUrl') ??
     `${apiPrefix(opts.pathPrefix)}${ApiPaths.questionSetHierarchy}`;
-  // Base ends with `/` (identifier appended); tolerate a host value without one.
-  const path = base.endsWith('/') ? `${base}${identifier}` : `${base}/${identifier}`;
-  // mode=edit so the editor can preview draft / in-progress question sets.
-  const url = path.includes('?') ? `${path}&mode=edit` : `${path}?mode=edit`;
+  const path = appendPathSegment(base, identifier);
+  // `mode=edit` makes the backend return the Draft/.img working copy over the
+  // Live node, so it is opt-in for authoring previews only (see
+  // LoadOptions.previewMode). Learner delivery falls through to the plain
+  // path and therefore only ever sees published content.
+  const url = opts.previewMode ? withQueryParam(path, 'mode=edit') : path;
   const result = await httpGet<QuestionSetHierarchyResult>(url, { baseURL: opts.baseUrl });
   if (!result?.questionset) {
     throw new QumlApiError('invalid', 'Hierarchy response missing `questionset`');
@@ -104,7 +130,9 @@ export async function getQuestions(
   if (!identifiers || identifiers.length === 0) return [];
   const listBase =
     hostEndpoint('questionListUrl') ?? `${apiPrefix(opts.pathPrefix)}${ApiPaths.questionList}`;
-  const url = opts.language ? `${listBase}?lang=${opts.language}` : listBase;
+  // Same reasoning as appendPathSegment: a host-supplied list URL may already
+  // carry a query, and a bare `?lang=` would then emit a second `?`.
+  const url = opts.language ? withQueryParam(listBase, `lang=${opts.language}`) : listBase;
 
   const chunks: string[][] = [];
   for (let i = 0; i < identifiers.length; i += QUESTION_BATCH_SIZE) {
@@ -123,23 +151,87 @@ export async function getQuestions(
   return results.flatMap((r) => r?.questions ?? []);
 }
 
-/** Top-level children that represent sections (question stubs live under them). */
+/**
+ * Section-level config/metadata a synthetic (implicit) section inherits from
+ * the questionset root, since it has no authored section node of its own.
+ */
+const IMPLICIT_SECTION_INHERITED_KEYS = [
+  'instructions',
+  'timeLimits',
+  'allowSkip',
+  'shuffle',
+  'showTimer',
+  'showSolutions',
+  'showHints',
+  'showFeedback',
+  'metadata',
+] as const;
+
+/**
+ * Build a synthetic section node wrapping a run of root-level question stubs.
+ *
+ * Carries the questionset's OWN identifier, not a fabricated one: this id
+ * escapes as `MediaResolveContext.sectionId` (offline asset paths, see
+ * `utils/media.ts`) and as `sectionId` on RESPONSE/ASSESS telemetry, so a
+ * made-up value would point downloads at a directory that does not exist and
+ * put ids into analytics that exist nowhere in the content graph.
+ */
+function wrapImplicitSection(
+  questionSet: RawQuestionSet,
+  run: RawQuestionSetChild[],
+): RawQuestionSetChild {
+  const inherited: Record<string, unknown> = {};
+  for (const key of IMPLICIT_SECTION_INHERITED_KEYS) {
+    if (questionSet[key] !== undefined) inherited[key] = questionSet[key];
+  }
+  return {
+    ...inherited,
+    identifier: questionSet.identifier,
+    objectType: 'QuestionSet',
+    name: questionSet.name,
+    isImplicitSection: true,
+    children: run,
+  } as unknown as RawQuestionSetChild;
+}
+
+/**
+ * Top-level children that represent sections (question stubs live under
+ * them). Three layouts are supported:
+ *  - fully sectioned: every child is a Section → returned as-is;
+ *  - fully flat: every child is a bare Question → the whole root is wrapped
+ *    as one implicit section;
+ *  - mixed: Section and bare Question children interleaved at root → each
+ *    consecutive run of loose questions is wrapped as its own implicit
+ *    section, preserving the original hierarchy order relative to the real,
+ *    authored sections.
+ */
 function extractSectionNodes(questionSet: RawQuestionSet): RawQuestionSetChild[] {
   const children = questionSet.children ?? [];
   if (children.length === 0) return [];
-  // Flat set: questions directly under the root, no sections → wrap as one section.
+
   const allQuestions = children.every((c) => c.objectType === 'Question');
-  if (allQuestions) return [questionSet as unknown as RawQuestionSetChild];
-  // Mixed layout (Section + bare Question siblings) is unsupported; the loose
-  // questions are not rendered. Warn instead of dropping them silently.
-  const loose = children.filter((c) => c.objectType === 'Question');
-  if (loose.length > 0) {
-    console.warn(
-      `[data-service] ${loose.length} root-level question(s) ignored (mixed section/question layout unsupported):`,
-      loose.map((q) => q.identifier),
-    );
+  if (allQuestions) {
+    return [{ ...questionSet, isImplicitSection: true } as unknown as RawQuestionSetChild];
   }
-  return children.filter((c) => c.objectType !== 'Question');
+  if (children.every((c) => c.objectType !== 'Question')) return children;
+
+  // Mixed layout: walk children in order, grouping consecutive loose
+  // questions into implicit sections interleaved with the real ones.
+  const nodes: RawQuestionSetChild[] = [];
+  for (let i = 0; i < children.length; ) {
+    if (children[i].objectType !== 'Question') {
+      nodes.push(children[i]);
+      i += 1;
+      continue;
+    }
+    const run: RawQuestionSetChild[] = [];
+    while (i < children.length && children[i].objectType === 'Question') {
+      run.push(children[i]);
+      i += 1;
+    }
+    nodes.push(wrapImplicitSection(questionSet, run));
+  }
+  return nodes;
 }
 
 /** Question stubs within a section, ordered by `index` when present. */

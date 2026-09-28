@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { t, readI18n } from '../../i18n/translations';
 import { TimerIcon, MenuIcon } from '../icons';
-import type { Section } from '../../types';
+import { isAnswered } from '../../utils/answered';
+import { sequenceEntries, stepLabel } from '../../utils/sections';
+import type { Section, AnswersMap } from '../../types';
 import styles from './PlayerHeader.module.scss';
 
 /**
@@ -15,7 +17,10 @@ export interface PlayerHeaderProps {
   brand: string;
   sections: Section[];
   currentSectionIndex: number;
+  currentQuestionIndex: number;
   completed: boolean[];
+  /** Drives the step status of root-level questions, which get a step each. */
+  answers: AnswersMap;
   /** Seconds remaining (countdown mode); null/omitted hides the countdown. */
   timeRemaining?: number | null;
   /**
@@ -61,7 +66,9 @@ export function PlayerHeader({
   brand,
   sections,
   currentSectionIndex,
+  currentQuestionIndex,
   completed,
+  answers,
   timeRemaining = null,
   timeElapsed = null,
   questionNumber,
@@ -79,6 +86,19 @@ export function PlayerHeader({
   const showTimer = showCountdown || timeElapsed != null;
   const isTimeLow = showCountdown && timeRemaining <= 60;
   const [showLegend, setShowLegend] = useState(false);
+
+  // The rail scrolls with its scrollbar hidden, so keep the active step in
+  // view as the learner advances — otherwise progressing past the visible
+  // range would leave the current position off-screen with no obvious way
+  // back to it. `block: 'nearest'` so this never scrolls the page itself.
+  const activeStepRef = useRef<HTMLLIElement | null>(null);
+  useEffect(() => {
+    const el = activeStepRef.current;
+    // jsdom (tests) doesn't implement scrollIntoView.
+    if (typeof el?.scrollIntoView === 'function') {
+      el.scrollIntoView({ block: 'nearest', inline: 'center' });
+    }
+  }, [currentSectionIndex, currentQuestionIndex, sections]);
 
   return (
     <header className={styles.header}>
@@ -109,21 +129,31 @@ export function PlayerHeader({
         {sectionLabel && <span className={styles.sectionLabel}>{sectionLabel}</span>}
 
         <ol className={styles.steps} aria-label={t(language, 'SECTIONS')}>
-          {sections.map((section, index) => {
-            const status =
-              index === currentSectionIndex
-                ? 'active'
-                : completed[index]
-                  ? 'completed'
-                  : 'upcoming';
+          {sequenceEntries(sections).map((entry, index) => {
+            // A question step never falls back to the implicit section's name:
+            // that is the questionset's name, so an unnamed question would be
+            // titled after the whole assessment.
+            const title =
+              entry.kind === 'question'
+                ? entry.question.name || `${t(language, 'QUESTION')} ${entry.questionIndex + 1}`
+                : readI18n(entry.section.name, language);
+            const isActive =
+              entry.sectionIndex === currentSectionIndex &&
+              (entry.kind === 'section' || entry.questionIndex === currentQuestionIndex);
+            const isDone =
+              entry.kind === 'question'
+                ? isAnswered(answers[entry.question.identifier])
+                : completed[entry.sectionIndex];
+            const status = isActive ? 'active' : isDone ? 'completed' : 'upcoming';
             return (
               <li
-                key={section.identifier}
+                key={entry.kind === 'question' ? entry.question.identifier : entry.section.identifier}
+                ref={status === 'active' ? activeStepRef : undefined}
                 className={`${styles.step} ${styles[status]}`}
                 aria-current={status === 'active' ? 'step' : undefined}
-                title={readI18n(section.name, language)}
+                title={title}
               >
-                <span className={styles.stepDot}>{String.fromCharCode(65 + index)}</span>
+                <span className={styles.stepDot}>{stepLabel(index)}</span>
               </li>
             );
           })}
