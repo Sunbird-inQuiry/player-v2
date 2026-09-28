@@ -39,16 +39,9 @@ export interface LoadOptions {
    */
   pathPrefix?: string;
   /**
-   * Authoring/preview context — fetch the DRAFT working copy rather than the
-   * published one.
-   *
-   * On the Sunbird backend `?mode=edit` returns the Draft/`.img` node instead
-   * of the Live node whenever a draft exists. That is what an editor preview
-   * wants (the whole point is to see unsaved/unpublished work), but it must
-   * never be the default: the fetch path this flag controls is also used for
-   * real learner delivery, where serving a creator's in-progress draft is a
-   * content leak. Defaults to false, so Draft access is always an explicit
-   * opt-in.
+   * Fetch the DRAFT working copy (`?mode=edit`) rather than the published one.
+   * Opt-in, defaulting to false: the same fetch path serves real learners, and
+   * a creator's in-progress draft is a content leak there.
    */
   previewMode?: boolean;
 }
@@ -81,13 +74,9 @@ function hostEndpoint(key: 'questionListUrl' | 'questionSetHierarchyUrl'): strin
 }
 
 /**
- * Append a path segment to a base URL that may already carry a query string.
- *
- * `window.questionSetHierarchyUrl` is host-supplied, so it can arrive with one
- * (e.g. a gateway token). Naive concatenation put the identifier *inside* the
- * query — `/hierarchy/?foo=1/do_x` — making it part of `foo`'s value rather
- * than part of the path. The query is split off, the segment joined to the
- * path, then the query re-attached.
+ * Append a path segment to a base URL that may already carry a query string —
+ * `window.questionSetHierarchyUrl` is host-supplied and can arrive with one.
+ * Naive concatenation put the identifier inside the query: `/hierarchy/?foo=1/do_x`.
  */
 function appendPathSegment(base: string, segment: string): string {
   const queryAt = base.indexOf('?');
@@ -181,15 +170,11 @@ const IMPLICIT_SECTION_INHERITED_KEYS = [
 /**
  * Build a synthetic section node wrapping a run of root-level question stubs.
  *
- * Carries the questionset's OWN identifier rather than a fabricated one. These
- * questions really do sit at the root, and the id does not stay internal — it
- * becomes `MediaResolveContext.sectionId`, which `utils/media.ts` uses to build
- * offline asset paths (`{basePath}/{sectionId}/{questionId}/{src}`), and it is
- * reported as `sectionId` on RESPONSE/ASSESS telemetry. A synthesized id would
- * point downloaded content at a directory that does not exist (images would
- * silently fail to load) and would put ids into analytics that exist nowhere in
- * the content graph. The fully-flat branch in `extractSectionNodes` already
- * keeps the root identifier; this keeps the two consistent.
+ * Carries the questionset's OWN identifier, not a fabricated one: this id
+ * escapes as `MediaResolveContext.sectionId` (offline asset paths, see
+ * `utils/media.ts`) and as `sectionId` on RESPONSE/ASSESS telemetry, so a
+ * made-up value would point downloads at a directory that does not exist and
+ * put ids into analytics that exist nowhere in the content graph.
  */
 function wrapImplicitSection(
   questionSet: RawQuestionSet,

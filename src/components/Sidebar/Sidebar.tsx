@@ -2,25 +2,19 @@ import { useState } from 'react';
 import { t, readI18n } from '../../i18n/translations';
 import { isAnswered } from '../../utils/answered';
 import { ChevronRightIcon } from '../icons';
-import { expandsPerQuestion, stepLabel } from '../../utils/sections';
+import { expandsPerQuestion, sectionStepOrdinal, stepLabel } from '../../utils/sections';
 import type { Section, Question, AnswersMap } from '../../types';
 import styles from './Sidebar.module.scss';
 
 /**
  * Sidebar — persistent section/question navigator (Phase 6 design).
  *
- * Pure presentational `nav` landmark: a top-level lettered sequence (A, B,
- * C…) where each entry is either a real section card (name, blurb,
- * answered/total status, collapsible to reveal its own questions as
- * unlettered sub-items underneath) or — for a section synthesized to hold
- * root-level questions with no authored Section wrapper
- * (`section.isImplicitSection`) — one lettered row PER question, each a
- * sibling step in the same sequence as the section cards rather than a
- * child of one. The active section/question is highlighted. Status is
- * derived from Context-supplied props; jump intent is emitted via
- * `onSectionJump`/`onQuestionJump` (MainPlayer maps them to
- * setCurrentSection/setCurrentQuestion). The only local state is
- * expand/collapse — purely a view concern, no Context mutation.
+ * Pure presentational `nav` landmark over the top-level sequence
+ * (`utils/sections`): a real section is one collapsible card whose questions
+ * are unnumbered sub-items; a root-level question is a numbered row of its
+ * own, a sibling of the section cards rather than a child. Jump intent is
+ * emitted via `onSectionJump`/`onQuestionJump`. The only local state is
+ * expand/collapse — a view concern, no Context mutation.
  */
 export interface SidebarProps {
   sections: Section[];
@@ -42,48 +36,46 @@ function questionLabel(question: Question, qIndex: number, language: string): st
   return question.name || `${t(language, 'QUESTION')} ${qIndex + 1}`;
 }
 
+const ROW_STYLES = {
+  loose: {
+    base: styles.looseItem,
+    active: styles.looseItemActive,
+    answered: styles.looseItemAnswered,
+  },
+  sub: { base: styles.subItem, active: styles.subItemActive, answered: styles.subItemAnswered },
+} as const;
+
 /**
- * A question row. `letter` is only passed for a root-level (implicit-section)
- * question — it's a top-level step in its own right, so it gets the same
- * lettered badge a section card gets. A question nested under a real section
- * has no letter of its own (the section's single letter already covers it).
+ * A question row. `loose` is a root-level question — a top-level step in its
+ * own right, so it carries a badge and its own ●/○ dot, there being no section
+ * card aggregating it into a count. `sub` is a question under a real section,
+ * whose card already covers both.
  */
 function QuestionRow({
   question,
   qIndex,
   isActive,
   answered,
-  className,
-  activeClassName,
-  answeredClassName,
+  variant,
   onClick,
   language,
   letter,
-  showStatusDot,
 }: {
   question: Question;
   qIndex: number;
   isActive: boolean;
   answered: boolean;
-  className: string;
-  activeClassName: string;
-  answeredClassName: string;
+  variant: 'loose' | 'sub';
   onClick: () => void;
   language: string;
   letter?: string;
-  /**
-   * A root-level question has no section grouping it into an aggregate
-   * ●/○ count the way a real section's card already shows one — so it gets
-   * its own single status dot instead: hollow while unanswered, filled in
-   * the brand color once answered.
-   */
-  showStatusDot?: boolean;
 }) {
+  const row = ROW_STYLES[variant];
   return (
     <li key={question.identifier}>
       <button
         type="button"
-        className={[className, answered && answeredClassName, isActive && activeClassName]
+        className={[row.base, answered && row.answered, isActive && row.active]
           .filter(Boolean)
           .join(' ')}
         onClick={onClick}
@@ -98,7 +90,7 @@ function QuestionRow({
           </span>
         )}
         <span className={styles.subName}>{questionLabel(question, qIndex, language)}</span>
-        {showStatusDot && (
+        {variant === 'loose' && (
           <span
             className={`${styles.statusDot} ${answered ? styles.statusDotAnswered : ''}`.trim()}
             aria-label={t(language, answered ? 'ANSWERED' : 'UNANSWERED')}
@@ -127,41 +119,32 @@ export function Sidebar({
   const toggleExpand = (identifier: string, currentlyExpanded: boolean) =>
     setExpandOverride((prev) => ({ ...prev, [identifier]: !currentlyExpanded }));
 
-  let letterOrdinal = 0;
-
   return (
     <nav className={styles.sidebar} aria-label={t(language, 'NAVIGATION')}>
       <p className={styles.label}>{t(language, 'SECTIONS')}</p>
 
       <ul className={styles.list}>
         {sections.map((section, sectionIndex) => {
-          // Implicit section (root-level questions, no authored Section wrapper):
-          // no header, no collapse — each question is a top-level row rather
-          // than a child of a section. Alongside real sections it also takes
-          // its own place in the A/B/C… sequence; in a FLAT set there are no
-          // real sections to sequence against, so the rows carry no letter.
+          // Implicit section (root-level questions, no authored Section
+          // wrapper): no header, no collapse — each question is a top-level
+          // row. It only carries a number when there are real sections to
+          // sequence against, so a FLAT set's rows stay unnumbered.
           if (section.isImplicitSection) {
             const lettered = expandsPerQuestion(section, sections);
-            return section.children.map((question, qIndex) => {
-              const letter = lettered ? stepLabel(letterOrdinal) : undefined;
-              if (lettered) letterOrdinal += 1;
-              return (
-                <QuestionRow
-                  key={question.identifier}
-                  question={question}
-                  qIndex={qIndex}
-                  isActive={sectionIndex === currentSectionIndex && qIndex === currentQuestionIndex}
-                  answered={isAnswered(answers[question.identifier])}
-                  className={styles.looseItem}
-                  activeClassName={styles.looseItemActive}
-                  answeredClassName={styles.looseItemAnswered}
-                  onClick={() => onQuestionJump(sectionIndex, qIndex)}
-                  language={language}
-                  letter={letter}
-                  showStatusDot
-                />
-              );
-            });
+            const firstOrdinal = sectionStepOrdinal(sections, sectionIndex);
+            return section.children.map((question, qIndex) => (
+              <QuestionRow
+                key={question.identifier}
+                question={question}
+                qIndex={qIndex}
+                isActive={sectionIndex === currentSectionIndex && qIndex === currentQuestionIndex}
+                answered={isAnswered(answers[question.identifier])}
+                variant="loose"
+                onClick={() => onQuestionJump(sectionIndex, qIndex)}
+                language={language}
+                letter={lettered ? stepLabel(firstOrdinal + qIndex) : undefined}
+              />
+            ));
           }
 
           const isActive = sectionIndex === currentSectionIndex;
@@ -170,8 +153,7 @@ export function Sidebar({
           const answered = answeredCount(section, answers);
           const blurb = readI18n(section.description, language);
           const name = readI18n(section.name, language);
-          const letter = stepLabel(letterOrdinal);
-          letterOrdinal += 1;
+          const letter = stepLabel(sectionStepOrdinal(sections, sectionIndex));
 
           return (
             <li key={section.identifier}>
@@ -230,9 +212,7 @@ export function Sidebar({
                       qIndex={qIndex}
                       isActive={sectionIndex === currentSectionIndex && qIndex === currentQuestionIndex}
                       answered={isAnswered(answers[question.identifier])}
-                      className={styles.subItem}
-                      activeClassName={styles.subItemActive}
-                      answeredClassName={styles.subItemAnswered}
+                      variant="sub"
                       onClick={() => onQuestionJump(sectionIndex, qIndex)}
                       language={language}
                     />

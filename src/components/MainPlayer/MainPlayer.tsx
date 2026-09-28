@@ -24,7 +24,6 @@ import { QumlApiError } from '../../types/api';
 import { calculateScore } from '../../registry/scoring-registry';
 import { isAnswered } from '../../utils/answered';
 import {
-  expandsPerQuestion,
   globalQuestionNumber,
   sectionStepCount,
   sectionStepOrdinal,
@@ -32,6 +31,16 @@ import {
 } from '../../utils/sections';
 import type { Question, Section, PlayerConfig, I18nValue } from '../../types';
 import styles from './MainPlayer.module.scss';
+
+/**
+ * Modes in which the host is previewing authoring output, so the player should
+ * fetch the Draft working copy. An explicit allow-list, not "any truthy mode":
+ * `config` is an open record and hosts commonly pass `mode: 'play'`, which a
+ * truthiness test would put back on unpublished Draft content.
+ */
+const AUTHORING_MODES = ['edit', 'review', 'read', 'orgreview', 'sourcingreview'];
+const isAuthoringMode = (m: unknown) =>
+  typeof m === 'string' && AUTHORING_MODES.includes(m.toLowerCase());
 
 /**
  * MainPlayer — top-level orchestrator + assessment shell (Phase 5 engine +
@@ -110,10 +119,8 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
   const sectionIntrosEnabled =
     (playerConfig?.config as { showSectionIntro?: boolean } | undefined)?.showSectionIntro !== false;
 
-  // A section synthesized by the data layer to hold root-level questions with
-  // no authored Section wrapper (fully-flat questionset, or loose questions in
-  // a mixed layout) isn't a "section" from the author's perspective — never
-  // show its intro screen, regardless of the showSectionIntro config value.
+  // A synthesized group holding root-level questions isn't a "section" from
+  // the author's perspective — never show its intro, whatever the config says.
   const shouldShowSectionIntro = (index: number) =>
     sectionIntrosEnabled && !state.sections[index]?.isImplicitSection;
 
@@ -220,22 +227,10 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
     const pathPrefix =
       (typeof cfg.apiSlug === 'string' ? cfg.apiSlug : undefined) ??
       (typeof cfg.slug === 'string' ? cfg.slug : undefined);
-    // Draft (`?mode=edit`) content is for authoring previews only.
-    //
-    // Matched against an explicit allow-list rather than "any truthy mode":
-    // `config` is an open record, and hosts commonly pass `mode: 'play'` — which
-    // under a truthiness test would put learners back on unpublished Draft
-    // content, the exact leak this guard exists to prevent.
-    //
-    // Both `config.mode` (what the editor host forwards into the player config)
-    // and `context.mode` (where this repo otherwise reads mode from — see
-    // telemetry-service's `mode: context.mode`) are honoured, because an editor
-    // that sets only the latter would otherwise silently lose draft preview —
-    // and for a questionset that has never been published there is no Live node
-    // at all, so the fetch would fail outright.
-    const AUTHORING_MODES = ['edit', 'review', 'read', 'orgreview', 'sourcingreview'];
-    const isAuthoringMode = (m: unknown) =>
-      typeof m === 'string' && AUTHORING_MODES.includes(m.toLowerCase());
+    // Both `config.mode` (what an editor host forwards into the player config)
+    // and `context.mode` (where this repo otherwise reads mode from) count: an
+    // editor setting only the latter would silently lose draft preview, and an
+    // unpublished questionset has no Live node, so the fetch would fail.
     const previewMode =
       isAuthoringMode(cfg.mode) || isAuthoringMode(playerConfig.context?.mode);
 
@@ -300,12 +295,8 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
       (n, s) => n + s.children.reduce((m, q) => m + (q.maxScore ?? 1), 0),
       0,
     );
-    // A real section counts as one. A section synthesized to hold root-level
-    // questions isn't a section at all — alongside real sections each of its
-    // questions counts as its own step (A = section, B = loose question,
-    // C = ...). In a FLAT set there are no real sections to sit alongside, so
-    // the single group counts as one; expanding it would report e.g.
-    // "SECTIONS 30" for a questionset with no sections at all.
+    // Not `sections.length`: a root-level question is its own step alongside
+    // real sections (see utils/sections).
     const totalSections = sectionStepCount(state.sections);
     const timeLimits = (data.timeLimits as { questionSet?: { max?: number } } | undefined)
       ?.questionSet;
@@ -601,11 +592,9 @@ export function MainPlayer({ playerConfig, onPlayerEvent }: MainPlayerProps) {
 
   // Angular parity (section-player.component.ts:898, eventName.goToQuestion).
   const handleQuestionJump = (sectionIndex: number, questionIndex: number) => {
-    // Report the question being opened, not merely its section: the sidebar
-    // now emits real per-question jumps, so a section index would collapse
-    // every jump within one section to the same pageid. Computed from the
-    // arguments because the setCurrentSection/setCurrentQuestion calls below
-    // have not taken effect yet.
+    // The question, not its section: per-question jumps would otherwise all
+    // report the same pageid. From the arguments, since the setters below have
+    // not taken effect yet.
     logInteraction(
       'go_to_question',
       globalQuestionNumber(state.sections, sectionIndex, questionIndex),

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { t, readI18n } from '../../i18n/translations';
 import { TimerIcon, MenuIcon } from '../icons';
 import { isAnswered } from '../../utils/answered';
-import { expandsPerQuestion, stepLabel } from '../../utils/sections';
+import { sequenceEntries, stepLabel } from '../../utils/sections';
 import type { Section, AnswersMap } from '../../types';
 import styles from './PlayerHeader.module.scss';
 
@@ -19,12 +19,7 @@ export interface PlayerHeaderProps {
   currentSectionIndex: number;
   currentQuestionIndex: number;
   completed: boolean[];
-  /**
-   * Drives the per-question step status for root-level questions (a section
-   * synthesized to hold questions with no authored Section wrapper —
-   * `section.isImplicitSection` — contributes one step per question instead
-   * of one step for the whole group; real sections still contribute one).
-   */
+  /** Drives the step status of root-level questions, which get a step each. */
   answers: AnswersMap;
   /** Seconds remaining (countdown mode); null/omitted hides the countdown. */
   timeRemaining?: number | null;
@@ -134,55 +129,34 @@ export function PlayerHeader({
         {sectionLabel && <span className={styles.sectionLabel}>{sectionLabel}</span>}
 
         <ol className={styles.steps} aria-label={t(language, 'SECTIONS')}>
-          {(() => {
-            // A real, authored section contributes one step. A section
-            // synthesized to hold root-level questions isn't a section at
-            // all — alongside real sections each of its questions becomes its
-            // own step, a sibling in the same A/B/C… sequence as section
-            // cards (same as the Sidebar). A FLAT set has no real sections to
-            // sit alongside, so its single group stays one step.
-            type Step = { key: string; title: string; active: boolean; completed: boolean };
-            const steps: Step[] = [];
-
-            sections.forEach((section, sectionIndex) => {
-              if (expandsPerQuestion(section, sections)) {
-                section.children.forEach((question, questionIndex) => {
-                  steps.push({
-                    key: question.identifier,
-                    // Never fall back to the implicit section's own name: it
-                    // is the questionset's name, so an unnamed question would
-                    // be titled after the whole assessment.
-                    title: question.name || `${t(language, 'QUESTION')} ${questionIndex + 1}`,
-                    active: sectionIndex === currentSectionIndex && questionIndex === currentQuestionIndex,
-                    completed: isAnswered(answers[question.identifier]),
-                  });
-                });
-                return;
-              }
-              steps.push({
-                key: section.identifier,
-                title: readI18n(section.name, language),
-                active: sectionIndex === currentSectionIndex,
-                completed: completed[sectionIndex],
-              });
-            });
-
-            return steps.map((step, index) => {
-              const letter = stepLabel(index);
-              const status = step.active ? 'active' : step.completed ? 'completed' : 'upcoming';
-              return (
-                <li
-                  key={step.key}
-                  ref={status === 'active' ? activeStepRef : undefined}
-                  className={`${styles.step} ${styles[status]}`}
-                  aria-current={status === 'active' ? 'step' : undefined}
-                  title={step.title}
-                >
-                  <span className={styles.stepDot}>{letter}</span>
-                </li>
-              );
-            });
-          })()}
+          {sequenceEntries(sections).map((entry, index) => {
+            // A question step never falls back to the implicit section's name:
+            // that is the questionset's name, so an unnamed question would be
+            // titled after the whole assessment.
+            const title =
+              entry.kind === 'question'
+                ? entry.question.name || `${t(language, 'QUESTION')} ${entry.questionIndex + 1}`
+                : readI18n(entry.section.name, language);
+            const isActive =
+              entry.sectionIndex === currentSectionIndex &&
+              (entry.kind === 'section' || entry.questionIndex === currentQuestionIndex);
+            const isDone =
+              entry.kind === 'question'
+                ? isAnswered(answers[entry.question.identifier])
+                : completed[entry.sectionIndex];
+            const status = isActive ? 'active' : isDone ? 'completed' : 'upcoming';
+            return (
+              <li
+                key={entry.kind === 'question' ? entry.question.identifier : entry.section.identifier}
+                ref={status === 'active' ? activeStepRef : undefined}
+                className={`${styles.step} ${styles[status]}`}
+                aria-current={status === 'active' ? 'step' : undefined}
+                title={title}
+              >
+                <span className={styles.stepDot}>{stepLabel(index)}</span>
+              </li>
+            );
+          })}
         </ol>
       </div>
 

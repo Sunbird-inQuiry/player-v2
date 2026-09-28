@@ -125,12 +125,9 @@ export interface Section {
    */
   showFeedback?: boolean;
   /**
-   * True for a section synthesized by the data layer to hold root-level
-   * questions with no authored Section wrapper (fully-flat questionset, or
-   * loose questions in a mixed section/question layout) — never set for a
-   * real, authored section. Consumers use this to skip the per-section intro
-   * screen, since a synthetic grouping isn't a "section" from the author's
-   * perspective.
+   * True for a section the data layer synthesized to hold root-level questions
+   * with no authored Section wrapper; never set for a real section. A
+   * synthetic grouping isn't a "section", so it gets no intro screen.
    */
   isImplicitSection?: boolean;
 }
